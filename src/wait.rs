@@ -1,43 +1,33 @@
 use std::{
     cell::{Cell, RefCell},
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime},
 };
 
+#[cfg(feature = "http")]
 use url::Url;
 
-//#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Wait {
     /// Waits until `end_instant`
-    Elapsed {
-        end_instant: Instant,
-    },
+    Elapsed { end_instant: Instant },
 
     /// Waits until `path` exists (or with `not`, until it no longer exists)
-    Exists {
-        not: bool,
-        path: String,
-    },
+    Exists { not: bool, path: PathBuf },
 
     /// Waits until an HTTP GET to `url` returns `status` (or with `not`, until
     /// it no longer returns that code)
-    HttpGet {
-        not: bool,
-        url: String,
-        status: u16,
-    },
+    #[cfg(feature = "http")]
+    HttpGet { not: bool, url: String, status: u16 },
 
     /// Waits until a connection can be made to `host` (or with `not`, until a
     /// connection can no longer be made).
-    TcpHost {
-        not: bool,
-        host: String,
-    },
+    TcpHost { not: bool, host: String },
 
     /// Waits until a file is updated (or with `not`, until it stops being updated)
     Update {
         not: bool,
-        path: String,
+        path: PathBuf,
         last_update: Cell<Option<SystemTime>>,
     },
 
@@ -45,23 +35,21 @@ pub enum Wait {
     /// with `not`, until it hasn't been updated in at least some Duration).
     UpdateSince {
         not: bool,
-        path: String,
+        path: PathBuf,
         trigger_duration: Duration,
     },
 
+    /// Waits until a file's size has been changed (or with `not`, until it
+    /// stops changing). Nothing is implied about the direction of change.
     FileSize {
         not: bool,
-        path: String,
+        path: PathBuf,
         size_bytes: Cell<Option<u64>>,
     },
 
-    Custom {
-        f: fn() -> bool,
-    },
-
-    Pid {
-        pid: u64,
-    },
+    /// Waits until the specified `fn` (not `Fn`) returns true.
+    Custom { f: fn() -> bool },
+    // Pid { pid: u64, },
     // FileOpen(??), // Check if a handle is open on a particular file (ie, when a file is done being modified)
 }
 
@@ -84,6 +72,7 @@ impl Wait {
     ///
     /// When `not` is specified, this completes when an HTTP GET to `url`
     /// returns any other status value.
+    #[cfg(feature = "http")]
     pub fn new_http_get<T>(url: T, status: u16, not: bool) -> Self
     where
         T: Into<String>,
@@ -115,7 +104,7 @@ impl Wait {
     /// When `not` is specified, this completes when the file doesn't exist.
     pub fn new_file_exists<T>(path: T, not: bool) -> Self
     where
-        T: Into<String>,
+        T: Into<PathBuf>,
     {
         Self::Exists {
             not,
@@ -133,7 +122,7 @@ impl Wait {
     /// Contrast this with [new_file_update_since], which completes when
     pub fn new_file_update<T>(path: T, not: bool) -> Self
     where
-        T: Into<String>,
+        T: Into<PathBuf>,
     {
         Self::Update {
             not,
@@ -149,7 +138,7 @@ impl Wait {
     /// updated in two consecutive cycles.
     pub fn new_file_update_since<T>(path: T, not: bool, trigger_duration: Duration) -> Self
     where
-        T: Into<String>,
+        T: Into<PathBuf>,
     {
         Self::UpdateSince {
             not,
@@ -167,7 +156,7 @@ impl Wait {
     /// If metadata can't be retrieved for this file, this
     pub fn new_file_size<T>(path: T, not: bool) -> Self
     where
-        T: Into<String>,
+        T: Into<PathBuf>,
     {
         Self::FileSize {
             not,
@@ -182,11 +171,16 @@ impl Wait {
 
     //
 
+    /// Checks whether this condition is met.
+    ///
+    /// This is non-blocking, but depending on the variant may have some associated
+    /// delay (eg, an HTTP GET incurs TCP and possibly TLS handshake latency).
     pub fn condition_met(&self) -> bool {
         match self {
             Wait::Elapsed { end_instant } => *end_instant < Instant::now(),
             Wait::Exists { not: true, path } => !Path::new(path).exists(),
             Wait::Exists { not: false, path } => Path::new(path).exists(),
+            #[cfg(feature = "http")]
             Wait::HttpGet { not, url, status } => {
                 let result = ureq::get(url).call();
                 if *not {
@@ -211,9 +205,22 @@ impl Wait {
                 match last_update.get() {
                     Some(last_updated) => {
                         let is_updated = last_updated != current_modified;
-                        last_update.set(Some(last_updated));
 
-                        is_updated ^ not
+                        if *not {
+                            // We want to trigger when the file *isn't* updating.
+                            if is_updated {
+                                // Shouldn't trigger yet, but we should update the last known modified date
+                                last_update.set(Some(current_modified));
+                                false
+                            } else {
+                                // File hasn't updated, so we should trigger
+                                true
+                            }
+                        } else {
+                            // Since not==false: iff the file is updated, we trigger.
+                            // Triggering on an updated mod time doesn't ever need to update the value
+                            is_updated
+                        }
                     }
                     None => {
                         // Haven't tracked the time yet. We'll hang onto it now for the next iteration
@@ -269,19 +276,33 @@ impl Wait {
             }
 
             Wait::Custom { f } => (f)(),
+            //Wait::Pid { pid: _ } => todo!(),
+        }
+    }
 
-            Wait::Pid { pid: _ } => todo!(),
+    /// Wait for the completion of this condition. This will block the thread.
+    pub fn wait(&self, interval: Duration) {
+        loop {
+            let start = Instant::now();
+            if self.condition_met() {
+                return;
+            }
+
+            let loop_time = start.elapsed();
+            if interval > loop_time {
+                std::thread::sleep(interval - loop_time);
+            }
         }
     }
 }
 
-fn get_modified_time(path: &str) -> Option<SystemTime> {
-    let meta = std::fs::metadata(path).ok()?;
+fn get_modified_time(path: &Path) -> Option<SystemTime> {
+    let meta = path.metadata().ok()?;
     meta.modified().ok()
 }
 
-fn get_file_size(path: &str) -> Option<u64> {
-    let meta = std::fs::metadata(path).ok()?;
+fn get_file_size(path: &Path) -> Option<u64> {
+    let meta = path.metadata().ok()?;
     Some(meta.len())
 }
 
@@ -333,6 +354,7 @@ pub fn parse_duration(duration: &str) -> Option<Duration> {
 ///
 /// The URL is validated with the `url` crate, if possible, cleaning potential errors.
 /// If that fails, the URL is used as-is.
+#[cfg(feature = "http")]
 pub fn parse_http_get(urlarg: &str) -> (u16, String) {
     let urlbytes = urlarg.chars().collect::<Vec<_>>();
 
@@ -361,6 +383,7 @@ pub fn parse_http_get(urlarg: &str) -> (u16, String) {
 }
 
 /// Tries to parse a URL using the `url` crate.
+#[cfg(feature = "http")]
 fn parse_url(urlarg: &str) -> Option<Url> {
     let violations = RefCell::new(Vec::new());
     let url = Url::options()

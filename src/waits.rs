@@ -9,7 +9,21 @@ pub enum Waits {
 }
 
 impl Waits {
-    /// Returns true if this `Waits` is satisfied
+    /// Checks whether this condition - comprising all constituent [Wait]s - is satisfied.
+    ///
+    /// This is non-blocking, but depending on the conditions that comprise it, it may 
+    /// have some associated delay (eg, an HTTP GET incurs TCP and possibly TLS handshake 
+    /// latency). 
+    /// 
+    /// Short-circuit functionality may also affect the delay. For example:
+    /// 
+    /// ```
+    /// let a = Wait::new_file_exists("foo.txt");
+    /// let b = Wait::new_tcp_connect("extremely_slow_host:80", false);
+    /// 
+    /// let ab = (a.clone() | b.clone()).condition_met();
+    /// let ba = (b | a).condition_met();
+    /// ```
     pub fn condition_met(&self) -> bool {
         match self {
             Waits::Single(u) => u.condition_met(),
@@ -18,7 +32,7 @@ impl Waits {
         }
     }
 
-    /// Wait for the completion.
+    /// Wait for the completion of this condition. This will block the thread.
     pub fn wait(&self, interval: Duration) {
         loop {
             let start = Instant::now();
