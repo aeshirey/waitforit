@@ -1,4 +1,4 @@
-use crate::wait::Wait;
+use crate::Wait;
 use std::time::{Duration, Instant};
 
 /// Handles waiting for one or more [Wait]s.
@@ -11,16 +11,17 @@ pub enum Waits {
 impl Waits {
     /// Checks whether this condition - comprising all constituent [Wait]s - is satisfied.
     ///
-    /// This is non-blocking, but depending on the conditions that comprise it, it may 
-    /// have some associated delay (eg, an HTTP GET incurs TCP and possibly TLS handshake 
-    /// latency). 
-    /// 
+    /// This is non-blocking, but depending on the conditions that comprise it, it may
+    /// have some associated delay (eg, an HTTP GET incurs TCP and possibly TLS handshake
+    /// latency).
+    ///
     /// Short-circuit functionality may also affect the delay. For example:
-    /// 
+    ///
     /// ```
+    /// use waitforit::Wait;
     /// let a = Wait::new_file_exists("foo.txt");
-    /// let b = Wait::new_tcp_connect("extremely_slow_host:80", false);
-    /// 
+    /// let b = Wait::new_tcp_connect("extremely_slow_host:80");
+    ///
     /// let ab = (a.clone() | b.clone()).condition_met();
     /// let ba = (b | a).condition_met();
     /// ```
@@ -115,5 +116,25 @@ impl std::ops::BitOr for Waits {
 
     fn bitor(self, other: Waits) -> Self {
         Waits::Or(Box::new((self, other)))
+    }
+}
+
+impl std::ops::Not for Waits {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        match self {
+            Waits::Single(w) => Waits::Single(!w),
+            Waits::Or(ww) => {
+                // Apply DeMorgan
+                let (w0, w1) = (!ww.0, !ww.1);
+                Waits::And(Box::new((w0, w1)))
+            }
+            Waits::And(ww) => {
+                // Apply DeMorgan
+                let (w0, w1) = (!ww.0, !ww.1);
+                Waits::Or(Box::new((w0, w1)))
+            }
+        }
     }
 }

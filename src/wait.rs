@@ -1,5 +1,5 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime},
 };
@@ -7,22 +7,15 @@ use std::{
 #[cfg(feature = "http")]
 use url::Url;
 
+/// Waits for some condition to be met.
 #[derive(Clone, Debug)]
 pub enum Wait {
-    /// Waits until `end_instant`
-    Elapsed { end_instant: Instant },
+    /// Waits until `end_instant`. This can be negated, in which case it will
+    /// only trigger until the specified instant.
+    Elapsed { end_instant: Instant, not: bool },
 
     /// Waits until `path` exists (or with `not`, until it no longer exists)
     Exists { not: bool, path: PathBuf },
-
-    /// Waits until an HTTP GET to `url` returns `status` (or with `not`, until
-    /// it no longer returns that code)
-    #[cfg(feature = "http")]
-    HttpGet { not: bool, url: String, status: u16 },
-
-    /// Waits until a connection can be made to `host` (or with `not`, until a
-    /// connection can no longer be made).
-    TcpHost { not: bool, host: String },
 
     /// Waits until a file is updated (or with `not`, until it stops being updated)
     Update {
@@ -39,6 +32,15 @@ pub enum Wait {
         trigger_duration: Duration,
     },
 
+    /// Waits until a connection can be made to `host` (or with `not`, until a
+    /// connection can no longer be made).
+    TcpHost { not: bool, host: String },
+
+    /// Waits until an HTTP GET to `url` returns `status` (or with `not`, until
+    /// it no longer returns that code)
+    #[cfg(feature = "http")]
+    HttpGet { not: bool, url: String, status: u16 },
+
     /// Waits until a file's size has been changed (or with `not`, until it
     /// stops changing). Nothing is implied about the direction of change.
     FileSize {
@@ -48,15 +50,20 @@ pub enum Wait {
     },
 
     /// Waits until the specified `fn` (not `Fn`) returns true.
-    Custom { f: fn() -> bool },
+    Custom { f: fn() -> bool, not: bool },
     // Pid { pid: u64, },
     // FileOpen(??), // Check if a handle is open on a particular file (ie, when a file is done being modified)
 }
 
 impl Wait {
     /// Creates a new `Wait` that will complete at `end_instant`.
+    ///
+    /// Negating this type does nothing.
     pub fn new_elapsed(end_instant: Instant) -> Self {
-        Self::Elapsed { end_instant }
+        Self::Elapsed {
+            end_instant,
+            not: false,
+        }
     }
 
     /// Creates a new `Wait` that will complete after `duration` has passed,
@@ -64,21 +71,22 @@ impl Wait {
     pub fn new_elapsed_from_duration(duration: Duration) -> Self {
         Self::Elapsed {
             end_instant: std::time::Instant::now() + duration,
+            not: false,
         }
     }
 
     /// Creates a new `Wait` that completes when an HTTP GET to `url` returns
     /// the specified `status` code.
     ///
-    /// When `not` is specified, this completes when an HTTP GET to `url`
-    /// returns any other status value.
+    /// When negated, this completes when an HTTP GET to `url` returns any
+    /// other status value.
     #[cfg(feature = "http")]
-    pub fn new_http_get<T>(url: T, status: u16, not: bool) -> Self
+    pub fn new_http_get<T>(url: T, status: u16) -> Self
     where
         T: Into<String>,
     {
         Self::HttpGet {
-            not,
+            not: false,
             url: url.into(),
             status,
         }
@@ -89,84 +97,85 @@ impl Wait {
     ///
     /// When `not` is specified, this completes when a TCP connection can no
     /// longer be established.
-    pub fn new_tcp_connect<T>(host: T, not: bool) -> Self
+    pub fn new_tcp_connect<T>(host: T) -> Self
     where
         T: Into<String>,
     {
         Self::TcpHost {
-            not,
+            not: false,
             host: host.into(),
         }
     }
 
     /// Creates a new `Wait` that completes when the specified file exists.
     ///
-    /// When `not` is specified, this completes when the file doesn't exist.
-    pub fn new_file_exists<T>(path: T, not: bool) -> Self
+    /// When negated, this completes when the file doesn't exist.
+    pub fn new_file_exists<T>(path: T) -> Self
     where
         T: Into<PathBuf>,
     {
         Self::Exists {
-            not,
+            not: false,
             path: path.into(),
         }
     }
 
     /// Creates a new `Wait` that completes when the specified file is updated
-    /// (according to its [std::fs::Metadata](metadata)'s modified time). In other
-    /// words: as soon as the file is updated, this completes.
+    /// (according to its [metadata](std::fs::Metadata)'s modified time). In
+    /// other words: as soon as the file is updated, this completes.
     ///
-    /// When `not` is specified, this completes when the metadata has not been
-    /// updated in two consecutive cycles.
+    /// When negated, this completes when the metadata has not been updated in
+    /// two consecutive cycles.
     ///
-    /// Contrast this with [new_file_update_since], which completes when
-    pub fn new_file_update<T>(path: T, not: bool) -> Self
+    /// Contrast this with [Self::new_file_update_since], which completes when a
+    /// specified duration has passed after the file was last updated.
+    pub fn new_file_update<T>(path: T) -> Self
     where
         T: Into<PathBuf>,
     {
         Self::Update {
-            not,
+            not: false,
             path: path.into(),
             last_update: Cell::new(None),
         }
     }
 
     /// Creates a new `Wait` that completes when the specified file is updated
-    /// (according to its [std::fs::Metadata](metadata)'s modified time).
+    /// (according to its [metadata](std::fs::Metadata)'s modified time).
     ///
-    /// When `not` is specified, this completes when the metadata has not been
-    /// updated in two consecutive cycles.
-    pub fn new_file_update_since<T>(path: T, not: bool, trigger_duration: Duration) -> Self
+    /// When negated, this completes when the metadata has not been updated in
+    /// two consecutive cycles.
+    pub fn new_file_update_since<T>(path: T, trigger_duration: Duration) -> Self
     where
         T: Into<PathBuf>,
     {
         Self::UpdateSince {
-            not,
+            not: false,
             path: path.into(),
             trigger_duration,
         }
     }
 
     /// Creates a new `Wait` that completes when the specified file's size is
-    /// updated (according to its [std::fs::Metadata](metadata)'s length).
+    /// updated (according to its [metadata](std::fs::Metadata)'s length).
     ///
-    /// When `not` is specified, this completes when the file's length has not
-    /// been updated in two consecutive cycles.
+    /// When negated, this completes when the file's length has not been
+    /// updated in two consecutive cycles.
     ///
     /// If metadata can't be retrieved for this file, this
-    pub fn new_file_size<T>(path: T, not: bool) -> Self
+    pub fn new_file_size<T>(path: T) -> Self
     where
         T: Into<PathBuf>,
     {
         Self::FileSize {
-            not,
+            not: false,
             path: path.into(),
             size_bytes: Cell::new(None),
         }
     }
 
     pub fn new_custom(f: fn() -> bool) -> Self {
-        Self::Custom { f }
+        Self::Custom { f, not: false }
     }
 
     //
@@ -177,7 +186,13 @@ impl Wait {
     /// delay (eg, an HTTP GET incurs TCP and possibly TLS handshake latency).
     pub fn condition_met(&self) -> bool {
         match self {
-            Wait::Elapsed { end_instant } => *end_instant < Instant::now(),
+            Wait::Elapsed { end_instant, not } => {
+                if *not {
+                    *end_instant >= Instant::now()
+                } else {
+                    *end_instant < Instant::now()
+                }
+            }
             Wait::Exists { not: true, path } => !Path::new(path).exists(),
             Wait::Exists { not: false, path } => Path::new(path).exists(),
             #[cfg(feature = "http")]
@@ -275,8 +290,13 @@ impl Wait {
                 }
             }
 
-            Wait::Custom { f } => (f)(),
-            //Wait::Pid { pid: _ } => todo!(),
+            Wait::Custom { f, not } => {
+                if *not {
+                    !(f)()
+                } else {
+                    (f)()
+                }
+            } //Wait::Pid { pid: _ } => todo!(),
         }
     }
 
@@ -293,6 +313,71 @@ impl Wait {
                 std::thread::sleep(interval - loop_time);
             }
         }
+    }
+}
+
+impl std::ops::Not for Wait {
+    type Output = Self;
+
+    fn not(mut self) -> Self::Output {
+        let not = match &mut self {
+            Wait::Elapsed { not, .. } => not,
+            Wait::Exists { not, .. } => not,
+            Wait::HttpGet { not, .. } => not,
+            Wait::TcpHost { not, .. } => not,
+            Wait::Update { not, .. } => not,
+            Wait::UpdateSince { not, .. } => not,
+            Wait::FileSize { not, .. } => not,
+            Wait::Custom { not, .. } => not,
+        };
+
+        *not = !*not;
+
+        self
+
+        /*
+        match self {
+            Wait::Elapsed { end_instant, not } => Wait::Elapsed {
+                end_instant,
+                not: !not,
+            },
+            Wait::Exists { not, path } => Wait::Exists { not: !not, path },
+            Wait::HttpGet { not, url, status } => Wait::HttpGet {
+                not: !not,
+                url,
+                status,
+            },
+            Wait::TcpHost { not, host } => Wait::TcpHost { not: !not, host },
+            Wait::Update {
+                not,
+                path,
+                last_update,
+            } => Wait::Update {
+                not: !not,
+                path,
+                last_update,
+            },
+            Wait::UpdateSince {
+                not,
+                path,
+                trigger_duration,
+            } => Wait::UpdateSince {
+                not: !not,
+                path,
+                trigger_duration,
+            },
+            Wait::FileSize {
+                not,
+                path,
+                size_bytes,
+            } => Wait::FileSize {
+                not: !not,
+                path,
+                size_bytes,
+            },
+            Wait::Custom { f, not } => Wait::Custom { f, not: !not },
+        }
+        */
     }
 }
 
@@ -376,16 +461,12 @@ pub fn parse_http_get(urlarg: &str) -> (u16, String) {
     } else {
         (status_code, urlarg.to_string())
     }
-
-    /*
-    (status_code, urlarg.to_string())
-    */
 }
 
 /// Tries to parse a URL using the `url` crate.
 #[cfg(feature = "http")]
 fn parse_url(urlarg: &str) -> Option<Url> {
-    let violations = RefCell::new(Vec::new());
+    let violations = std::cell::RefCell::new(Vec::new());
     let url = Url::options()
         .syntax_violation_callback(Some(&|v| {
             violations.borrow_mut().push(v);
@@ -396,12 +477,15 @@ fn parse_url(urlarg: &str) -> Option<Url> {
     Some(url)
 }
 
+/// Checks that the input appears to be a valid `hostname:port` input, where `port`
+/// is a u16.
 pub fn validate_tcp(hostarg: &str) -> bool {
     // Assume that the last location of ':' is the delimiter for the port
     let last_colon = hostarg.char_indices().filter(|(_i, c)| c == &':').last();
     if let Some((i, _c)) = last_colon {
-        // Everything after the colon should be a numeric port number
-        hostarg.chars().skip(i + 1).all(|c| c.is_numeric())
+        // Everything after the colon should be a u16 port number
+        let port = &hostarg[i + 1..];
+        port.parse::<u16>().is_ok()
     } else {
         // There's no ':' in the input, so assume this isn't a host to which we can connect
         false
@@ -413,5 +497,14 @@ mod tests {
     fn valid_tcp() {
         assert!(super::validate_tcp("localhost:80"));
         assert!(!super::validate_tcp("localhost"));
+
+        assert!(super::validate_tcp("127.0.0.1:80"));
+        assert!(!super::validate_tcp("127.0.0.1"));
+
+        assert!(super::validate_tcp("127.0.0.1:8000"));
+        assert!(super::validate_tcp("127.0.0.1:65534"));
+        assert!(super::validate_tcp("127.0.0.1:65535"));
+        assert!(!super::validate_tcp("127.0.0.1:65536"));
+        assert!(!super::validate_tcp("127.0.0.1:-1"));
     }
 }
